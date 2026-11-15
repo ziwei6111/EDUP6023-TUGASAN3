@@ -1101,7 +1101,7 @@ showHint=function(){
   'use strict';
 
   // ==================== V9: REWARDS, CERTIFICATE, TEACHER RECORDS & CLOUD SYNC ====================
-  const V9_VERSION = 'Misi Memulihkan Karya V17';
+  const V9_VERSION = 'Misi Memulihkan Karya V20';
   // Add the Supabase Project URL and publishable/anon key here before hosting online.
   // Never place a service_role/secret key in this browser file.
   const V9_SUPABASE_URL = 'https://hrjibeatpncautvkkbpv.supabase.co';
@@ -1491,7 +1491,9 @@ showHint=function(){
     if (!d.profile || !v7ActiveStudent) return false;
     const sameName=v7Norm(d.profile.name)===v7Norm(v7ActiveStudent.name);
     const sameClass=v7Norm(d.profile.className)===v7Norm(v7ActiveStudent.className);
-    if (!sameName||!sameClass) return false;
+    const remoteNo=d.profile.studentNo ?? row.student_no ?? '';
+    const sameStudentNo=v7Norm(remoteNo)===v7Norm(v7ActiveStudent.studentNo||'');
+    if (!sameName||!sameClass||!sameStudentNo) return false;
     v9CloudRestoring=true;
     complete=Array.from({length:5},(_,i)=>!!d.complete?.[i]);
     notes=v7Clone(d.notes||{});studioNotes=v7Clone(d.studioNotes||{});learned=v7Clone(d.learned||{});drafts=v7Clone(d.drafts||{});v7MissionStats=v7Clone(d.missionStats||{});
@@ -1516,19 +1518,26 @@ showHint=function(){
       if(!session){const {data,error}=await sb.auth.signInAnonymously();if(error)throw error;session=data.session;}
       v9CloudUser=session?.user||null;
       if(!v9CloudUser)throw new Error('Sesi murid tidak dapat diwujudkan.');
-      const connectingUserId=v9CloudUser.id;
-      const {data:remote,error}=await sb.from('student_records').select('*').eq('student_id',connectingUserId).maybeSingle();
+      const {data:remote,error}=await sb.rpc('student_resume_record',{
+        name_input:v7ActiveStudent.name,
+        class_input:v7ActiveStudent.className,
+        student_no_input:v7ActiveStudent.studentNo||''
+      });
       if (!v7ActiveStudent || v7StudentKey(v7ActiveStudent)!==connectingProfileKey) return;
-      if(error)throw error;
+      if(error)throw new Error(`Tidak dapat mencari rekod murid. Jalankan kemas kini pangkalan data V20 dahulu. ${error.message||error}`);
       if(remote){
-        // Do not let an older/empty cloud row overwrite richer work still present on this device.
+        // Resume by the same name + class + student number, regardless of this device's anonymous auth ID.
         const localRec = v7StudentDB[connectingProfileKey] || null;
         const localProgress = (localRec?.complete || []).filter(Boolean).length * 20;
         const remoteProgress = Number(remote.progress_percent || (remote.completed_missions || []).filter(Boolean).length * 20);
         const localTime = Date.parse(localRec?.updatedAt || 0) || 0;
         const remoteTime = Date.parse(remote.updated_at || 0) || 0;
-        const localIsNewerOrRicher = !!localRec && (localProgress > remoteProgress || (localProgress === remoteProgress && localTime > remoteTime));
-        if(!localIsNewerOrRicher && !v9RestoreCloudRecord(remote))throw new Error('Sesi peranti ini dipautkan kepada profil lain. Gunakan pelayar yang sama untuk murid yang sama.');
+        const localHasWork = !!localRec && (
+          (localRec.complete||[]).some(Boolean) ||
+          ['notes','studioNotes','learned','drafts','missionStats'].some(k => localRec[k] && Object.keys(localRec[k]).length>0)
+        );
+        const localIsNewerOrRicher = localHasWork && (localProgress > remoteProgress || (localProgress === remoteProgress && localTime > remoteTime));
+        if(!localIsNewerOrRicher && !v9RestoreCloudRecord(remote))throw new Error('Maklumat murid tidak sepadan. Semak semula nama, kelas dan nombor murid.');
       }
       v9CloudMode=true;
       await v9SaveCloudNow();
@@ -1550,14 +1559,21 @@ showHint=function(){
     const profileAtStart = v7Clone(v7ActiveStudent);
     const payload = v9LocalRecordPayload();
     const completeAtStart = v7Clone(complete);
-    const row={student_id:userAtStart.id,student_name:profileAtStart.name,class_name:profileAtStart.className,student_no:profileAtStart.studentNo||null,progress_percent:completeAtStart.filter(Boolean).length*20,completed_missions:completeAtStart,record_data:payload,updated_at:new Date().toISOString()};
+    const saveArgs={
+      name_input:profileAtStart.name,
+      class_input:profileAtStart.className,
+      student_no_input:profileAtStart.studentNo||'',
+      progress_input:completeAtStart.filter(Boolean).length*20,
+      completed_input:completeAtStart,
+      record_input:payload
+    };
     v9CloudSaving=true;
     v9CloudSavePromise=(async()=>{
       try {
-        const {error}=await clientAtStart.from('student_records').upsert(row,{onConflict:'student_id'});
-        if(error)throw error;
+        const {error}=await clientAtStart.rpc('student_save_record',saveArgs);
+        if(error)throw new Error(`Simpan rekod awan gagal. Pastikan SQL V20 telah dijalankan. ${error.message||error}`);
         if(v7ActiveStudent && v7StudentKey(v7ActiveStudent)===profileKeyAtStart && v9CloudUser?.id===userAtStart.id) {
-          v9UpdateStatus('✓ Semua rekod terkini telah dihantar ke pangkalan data kelas.',true);
+          v9UpdateStatus('✓ Rekod murid disimpan. Log masuk semula pada peranti lain untuk menyambung kemajuan.',true);
         }
       } catch(e) {
         if(v7ActiveStudent && v7StudentKey(v7ActiveStudent)===profileKeyAtStart) {
@@ -1605,6 +1621,7 @@ showHint=function(){
   };
   if (v7ActiveStudent && V9_CLOUD_READY) setTimeout(v9ConnectStudentCloud,500);
 
+  // V20: student progress is resumed by normalized name + class + student number via secure RPC.
   // V11 bridge: each student profile has its own anonymous session; the gallery reuses that profile session.
   window.v11CloudBridge = {
     isConfigured: () => V9_CLOUD_READY,
@@ -1963,7 +1980,7 @@ window.v11ViewWork=async id=>{
 };
 window.v11SaveReview=async id=>{
  const p=profile();if(!p){alert('Sila daftar dahulu.');return}const a=[1,2,3,4].map(i=>$('v11R'+i)?.value.trim()||'');if(a.some(x=>!x)){alert('Lengkapkan empat bahagian komen apresiasi.');return}
- try{const {sb,user}=await ensureStudentCloud();const q=await sb.from('student_artworks').select('student_id').eq('id',id).single();if(q.error)throw q.error;if(q.data.student_id===user.id){alert('Karya sendiri tidak boleh menerima komen Apresiasi Karya Rakan daripada akaun yang sama.');return}
+ try{const {sb,user}=await ensureStudentCloud();const q=await sb.from('student_artworks').select('student_id,student_name,class_name,student_no').eq('id',id).single();if(q.error)throw q.error;const isOwnWork=q.data.student_id===user.id||(v7Norm(q.data.student_name)===v7Norm(p.name)&&v7Norm(q.data.class_name)===v7Norm(p.className)&&v7Norm(q.data.student_no||'')===v7Norm(p.studentNo||''));if(isOwnWork){alert('Karya sendiri tidak boleh menerima komen Apresiasi Karya Rakan daripada akaun yang sama.');return}
  const row={artwork_id:id,reviewer_id:user.id,reviewer_name:p.name,class_name:p.className,reviewer_no:p.studentNo||null,description:a[0],analysis:a[1],interpretation:a[2],consideration:a[3]};const ins=await sb.from('artwork_appreciations').insert(row);if(ins.error)throw ins.error;alert('Komen Apresiasi Karya Rakan berjaya dihantar.');window.v11ViewWork(id)
  }catch(e){alert('Komen belum berjaya dihantar: '+(e.message||e))}
 };
